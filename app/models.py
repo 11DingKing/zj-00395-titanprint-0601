@@ -18,6 +18,20 @@ class OrderStatus(str, enum.Enum):
     assembly_ready = "assembly_ready"
 
 
+class PowderBatchStatus(str, enum.Enum):
+    normal = "normal"
+    warning = "warning"
+    quarantined = "quarantined"
+    depleted = "depleted"
+
+
+class ReworkPriority(str, enum.Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+    urgent = "urgent"
+
+
 class RidingPosture(str, enum.Enum):
     road = "road"
     gravel = "gravel"
@@ -104,6 +118,29 @@ class EngineerConfirmation(Base):
     order = relationship("Order", back_populates="confirmation")
 
 
+class PowderBatch(Base):
+    __tablename__ = "powder_batches"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_no = Column(String(64), unique=True, nullable=False, index=True)
+    material = Column(String(64), nullable=False)
+    manufacturer = Column(String(128), nullable=False)
+    production_date = Column(DateTime, nullable=False)
+    expiry_date = Column(DateTime, nullable=False)
+    initial_weight_kg = Column(Float, nullable=False)
+    remaining_weight_kg = Column(Float, nullable=False)
+    status = Column(Enum(PowderBatchStatus), default=PowderBatchStatus.normal, nullable=False, index=True)
+    recycling_count = Column(Integer, default=0, nullable=False)
+    max_recycling = Column(Integer, default=10, nullable=False)
+    heat_treat_window_low_c = Column(Float)
+    heat_treat_window_high_c = Column(Float)
+    anomaly_note = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    schedules = relationship("ProductionSchedule", back_populates="powder_batch_ref")
+
+
 class PrintEquipment(Base):
     __tablename__ = "print_equipment"
 
@@ -123,8 +160,12 @@ class ProductionSchedule(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
     equipment_id = Column(Integer, ForeignKey("print_equipment.id"), nullable=False)
+    powder_batch_id = Column(Integer, ForeignKey("powder_batches.id"), index=True)
 
     powder_batch = Column(String(64), nullable=False)
+    recycling_count = Column(Integer, default=0, nullable=False)
+    heat_treat_window_low_c = Column(Float)
+    heat_treat_window_high_c = Column(Float)
     print_start = Column(DateTime, nullable=False)
     print_end = Column(DateTime, nullable=False)
     heat_treat_start = Column(DateTime)
@@ -135,6 +176,7 @@ class ProductionSchedule(Base):
 
     order = relationship("Order", back_populates="schedules")
     equipment = relationship("PrintEquipment", back_populates="schedules")
+    powder_batch_ref = relationship("PowderBatch", back_populates="schedules")
 
 
 class QualityInspection(Base):
@@ -151,12 +193,19 @@ class QualityInspection(Base):
 
     node_check = Column(String(32))
     node_check_detail = Column(Text)
+    node_check_result = Column(Enum(InspectionResult))
 
     flaw_detection_method = Column(String(64))
     flaw_detection_result = Column(Enum(InspectionResult), nullable=False)
     flaw_detection_detail = Column(Text)
 
     within_tolerance = Column(Boolean, nullable=False)
+    rework_priority = Column(Enum(ReworkPriority))
+    needs_batch_review = Column(Boolean, default=False)
+    batch_review_completed = Column(Boolean, default=False)
+    batch_review_note = Column(Text)
+    batch_reviewed_by = Column(String(128))
+    batch_reviewed_at = Column(DateTime)
 
     repair_opinion = Column(Text)
     inspector = Column(String(128), nullable=False)

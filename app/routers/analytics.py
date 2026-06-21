@@ -1,12 +1,12 @@
 from datetime import datetime
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, case
+from sqlalchemy import func, case, select
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import (
     PrintEquipment, ProductionSchedule, QualityInspection, Order, OrderStatus,
-    OrderStatusHistory,
+    OrderStatusHistory, PowderBatch,
 )
 from app.schemas import EquipmentUtilizationOut, ReworkRateOut, DeliveryCycleOut
 
@@ -17,9 +17,17 @@ router = APIRouter(prefix="/analytics", tags=["analytics"])
 def equipment_utilization(
     start: datetime | None = None,
     end: datetime | None = None,
+    powder_batch_id: int | None = None,
+    powder_batch_no: str | None = None,
     db: Session = Depends(get_db),
 ):
     equipments = db.query(PrintEquipment).filter(PrintEquipment.active.is_(True)).all()
+
+    batch_filter = None
+    if powder_batch_id:
+        batch_filter = ProductionSchedule.powder_batch_id == powder_batch_id
+    elif powder_batch_no:
+        batch_filter = ProductionSchedule.powder_batch == powder_batch_no
 
     if not start:
         earliest = db.query(func.min(ProductionSchedule.print_start)).scalar()
@@ -33,15 +41,17 @@ def equipment_utilization(
 
     result = []
     for eq in equipments:
-        sched_hours = (
-            db.query(func.coalesce(func.sum(ProductionSchedule.print_duration_hours), 0))
-            .filter(
-                ProductionSchedule.equipment_id == eq.id,
-                ProductionSchedule.print_start >= start,
-                ProductionSchedule.print_end <= end,
-            )
-            .scalar()
+        q = db.query(
+            func.coalesce(func.sum(ProductionSchedule.print_duration_hours), 0)
+        ).filter(
+            ProductionSchedule.equipment_id == eq.id,
+            ProductionSchedule.print_start >= start,
+            ProductionSchedule.print_end <= end,
         )
+        if batch_filter is not None:
+            q = q.filter(batch_filter)
+
+        sched_hours = q.scalar()
         result.append(
             EquipmentUtilizationOut(
                 equipment_id=eq.id,
@@ -57,34 +67,42 @@ def equipment_utilization(
 def rework_rate(
     start: datetime | None = None,
     end: datetime | None = None,
+    powder_batch_id: int | None = None,
+    powder_batch_no: str | None = None,
     db: Session = Depends(get_db),
 ):
     equipments = db.query(PrintEquipment).all()
     result = []
 
+    batch_filter = None
+    if powder_batch_id:
+        batch_filter = ProductionSchedule.powder_batch_id == powder_batch_id
+    elif powder_batch_no:
+        batch_filter = ProductionSchedule.powder_batch == powder_batch_no
+
     for eq in equipments:
-        schedule_ids = (
-            db.query(ProductionSchedule.id)
+        schedule_ids_q = (
+            select(ProductionSchedule.id)
             .filter(ProductionSchedule.equipment_id == eq.id)
         )
         if start:
-            schedule_ids = schedule_ids.filter(ProductionSchedule.print_start >= start)
+            schedule_ids_q = schedule_ids_q.filter(ProductionSchedule.print_start >= start)
         if end:
-            schedule_ids = schedule_ids.filter(ProductionSchedule.print_end <= end)
-        schedule_ids = schedule_ids.subquery()
+            schedule_ids_q = schedule_ids_q.filter(ProductionSchedule.print_end <= end)
+        if batch_filter is not None:
+            schedule_ids_q = schedule_ids_q.filter(batch_filter)
 
-        order_ids = (
-            db.query(ProductionSchedule.order_id)
-            .filter(ProductionSchedule.id.in_(schedule_ids))
+        order_ids_q = (
+            select(ProductionSchedule.order_id)
+            .filter(ProductionSchedule.id.in_(schedule_ids_q))
             .distinct()
-            .subquery()
         )
 
-        total = db.query(func.count(Order.id)).filter(Order.id.in_(order_ids)).scalar() or 0
+        total = db.query(func.count(Order.id)).filter(Order.id.in_(order_ids_q)).scalar() or 0
         rework_count = (
             db.query(func.count(OrderStatusHistory.id))
             .filter(
-                OrderStatusHistory.order_id.in_(order_ids),
+                OrderStatusHistory.order_id.in_(order_ids_q),
                 OrderStatusHistory.to_status == OrderStatus.rework,
             )
             .scalar()
@@ -107,10 +125,18 @@ def rework_rate(
 def delivery_cycle(
     start: datetime | None = None,
     end: datetime | None = None,
+    powder_batch_id: int | None = None,
+    powder_batch_no: str | None = None,
     db: Session = Depends(get_db),
 ):
     equipments = db.query(PrintEquipment).all()
     result = []
+
+    batch_filter = None
+    if powder_batch_id:
+        batch_filter = ProductionSchedule.powder_batch_id == powder_batch_id
+    elif powder_batch_no:
+        batch_filter = ProductionSchedule.powder_batch == powder_batch_no
 
     for eq in equipments:
         schedule_q = db.query(ProductionSchedule).filter(ProductionSchedule.equipment_id == eq.id)
@@ -118,6 +144,8 @@ def delivery_cycle(
             schedule_q = schedule_q.filter(ProductionSchedule.print_start >= start)
         if end:
             schedule_q = schedule_q.filter(ProductionSchedule.print_end <= end)
+        if batch_filter is not None:
+            schedule_q = schedule_q.filter(batch_filter)
         schedules = schedule_q.all()
 
         order_ids = list({s.order_id for s in schedules})

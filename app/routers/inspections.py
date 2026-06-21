@@ -2,7 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Order, QualityInspection, OrderStatus, OrderStatusHistory, InspectionResult
+from app.models import (
+    Order, QualityInspection, OrderStatus, OrderStatusHistory, InspectionResult,
+    ProductionSchedule, PowderBatch, PowderBatchStatus, ReworkPriority,
+)
 from app.schemas import QualityInspectionCreate, QualityInspectionOut
 from app.config import STATUS_LABELS
 
@@ -33,6 +36,69 @@ def create_inspection(order_id: int, payload: QualityInspectionCreate, db: Sessi
     from_status = order.status
     need_rework = (not payload.within_tolerance) or (payload.flaw_detection_result == InspectionResult.fail)
 
+    if payload.flaw_detection_result == InspectionResult.fail:
+        latest_schedule = (
+            db.query(ProductionSchedule)
+            .filter(ProductionSchedule.order_id == order_id)
+            .order_by(ProductionSchedule.created_at.desc())
+            .first()
+        )
+        if latest_schedule:
+            powder_batch = None
+            if latest_schedule.powder_batch_id:
+                powder_batch = (
+                    db.query(PowderBatch)
+                    .filter(PowderBatch.id == latest_schedule.powder_batch_id)
+                    .first()
+                )
+            else:
+                powder_batch = (
+                    db.query(PowderBatch)
+                    .filter(PowderBatch.batch_no == latest_schedule.powder_batch)
+                    .first()
+                )
+
+            if powder_batch and powder_batch.status != PowderBatchStatus.quarantined:
+                anomaly_note = f"订单 {order.order_no} 探伤检查不合格，怀疑粉末批次问题。探伤详情：{payload.flaw_detection_detail or '未提供'}"
+                if powder_batch.anomaly_note:
+                    powder_batch.anomaly_note = f"{powder_batch.anomaly_note}\n\n{anomaly_note}"
+                else:
+                    powder_batch.anomaly_note = anomaly_note
+                powder_batch.status = PowderBatchStatus.warning
+
+                all_schedules = (
+                    db.query(ProductionSchedule)
+                    .filter(
+                        ProductionSchedule.powder_batch_id == powder_batch.id
+                        if powder_batch.id else ProductionSchedule.powder_batch == powder_batch.batch_no
+                    )
+                    .all()
+                )
+
+                affected_order_ids = {s.order_id for s in all_schedules if s.order_id != order_id}
+
+                for affected_oid in affected_order_ids:
+                    affected_order = db.query(Order).filter(Order.id == affected_oid).first()
+                    if affected_order and affected_order.status in [
+                        OrderStatus.printing, OrderStatus.inspecting,
+                        OrderStatus.assembly_ready, OrderStatus.rework
+                    ]:
+                        affected_inspection = (
+                            db.query(QualityInspection)
+                            .filter(QualityInspection.order_id == affected_oid)
+                            .order_by(QualityInspection.inspected_at.desc())
+                            .first()
+                        )
+                        if affected_inspection:
+                            affected_inspection.needs_batch_review = True
+                            if affected_inspection.rework_priority is None or \
+                               affected_inspection.rework_priority in [ReworkPriority.low, ReworkPriority.medium]:
+                                affected_inspection.rework_priority = ReworkPriority.high
+
+                inspection.needs_batch_review = True
+                inspection.rework_priority = ReworkPriority.urgent
+                inspection.node_check_result = payload.node_check_result
+
     if need_rework:
         order.status = OrderStatus.rework
         reasons = []
@@ -43,6 +109,8 @@ def create_inspection(order_id: int, payload: QualityInspectionCreate, db: Sessi
         history_remark = f"质检结果不合格，转返修（{'、'.join(reasons)}）"
         if payload.repair_opinion:
             history_remark += f"；返修意见：{payload.repair_opinion}"
+        if inspection.needs_batch_review:
+            history_remark += "；已触发粉末批次异常关联复核"
     else:
         order.status = OrderStatus.assembly_ready
         history_remark = "质检通过（尺寸偏差在容差范围内，探伤检查合格），车架可装配"

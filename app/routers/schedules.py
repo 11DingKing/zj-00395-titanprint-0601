@@ -4,9 +4,13 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
 from app.database import get_db
-from app.models import Order, ProductionSchedule, PrintEquipment, OrderStatus, OrderStatusHistory
+from app.models import (
+    Order, ProductionSchedule, PrintEquipment, OrderStatus, OrderStatusHistory,
+    PowderBatch, PowderBatchStatus,
+)
 from app.schemas import (
     ProductionScheduleCreate, ProductionScheduleOut, ScheduleConflictOut,
+    PowderBatchOut,
 )
 from app.config import VALID_TRANSITIONS, STATUS_LABELS
 
@@ -66,6 +70,39 @@ def create_schedule(order_id: int, payload: ProductionScheduleCreate, db: Sessio
         if payload.heat_treat_end <= payload.heat_treat_start:
             raise HTTPException(400, "热处理结束时间必须晚于开始时间")
 
+    powder_batch_ref = None
+    warnings = []
+    if payload.powder_batch_id:
+        powder_batch_ref = db.query(PowderBatch).filter(PowderBatch.id == payload.powder_batch_id).first()
+        if not powder_batch_ref:
+            raise HTTPException(400, f"指定的粉末批次 ID {payload.powder_batch_id} 不存在")
+
+        if powder_batch_ref.status == PowderBatchStatus.quarantined:
+            raise HTTPException(
+                400,
+                f"粉末批次「{powder_batch_ref.batch_no}」已被隔离，禁止用于排产。"
+                f"异常说明：{powder_batch_ref.anomaly_note}",
+            )
+        if powder_batch_ref.status == PowderBatchStatus.warning:
+            warnings.append(f"粉末批次「{powder_batch_ref.batch_no}」存在异常警告：{powder_batch_ref.anomaly_note}")
+        if powder_batch_ref.status == PowderBatchStatus.depleted:
+            warnings.append(f"粉末批次「{powder_batch_ref.batch_no}」已耗尽，建议更换批次")
+        if powder_batch_ref.recycling_count >= powder_batch_ref.max_recycling:
+            warnings.append(f"粉末批次「{powder_batch_ref.batch_no}」已达最大回收次数 {powder_batch_ref.max_recycling}")
+        if powder_batch_ref.remaining_weight_kg <= 0:
+            warnings.append(f"粉末批次「{powder_batch_ref.batch_no}」剩余重量不足")
+    else:
+        powder_batch_ref = db.query(PowderBatch).filter(PowderBatch.batch_no == payload.powder_batch).first()
+        if powder_batch_ref:
+            if powder_batch_ref.status == PowderBatchStatus.quarantined:
+                raise HTTPException(
+                    400,
+                    f"粉末批次「{powder_batch_ref.batch_no}」已被隔离，禁止用于排产。"
+                    f"异常说明：{powder_batch_ref.anomaly_note}",
+                )
+            if powder_batch_ref.status == PowderBatchStatus.warning:
+                warnings.append(f"粉末批次「{powder_batch_ref.batch_no}」存在异常警告：{powder_batch_ref.anomaly_note}")
+
     conflicts = _check_conflicts(db, payload.equipment_id, payload.print_start, payload.print_end)
     if conflicts:
         raise HTTPException(
@@ -81,7 +118,11 @@ def create_schedule(order_id: int, payload: ProductionScheduleCreate, db: Sessio
     schedule = ProductionSchedule(
         order_id=order_id,
         equipment_id=payload.equipment_id,
+        powder_batch_id=powder_batch_ref.id if powder_batch_ref else None,
         powder_batch=payload.powder_batch,
+        recycling_count=payload.recycling_count,
+        heat_treat_window_low_c=payload.heat_treat_window_low_c,
+        heat_treat_window_high_c=payload.heat_treat_window_high_c,
         print_start=payload.print_start,
         print_end=payload.print_end,
         heat_treat_start=payload.heat_treat_start,
@@ -92,18 +133,25 @@ def create_schedule(order_id: int, payload: ProductionScheduleCreate, db: Sessio
 
     from_status = order.status
     order.status = OrderStatus.scheduled
+    remark = f"打印排产已创建，设备：{equipment.name}"
+    if warnings:
+        remark += f"。注意：{'；'.join(warnings)}"
     history = OrderStatusHistory(
         order_id=order.id,
         from_status=from_status,
         to_status=OrderStatus.scheduled,
         operator=None,
-        remark=f"打印排产已创建，设备：{equipment.name}",
+        remark=remark,
     )
     db.add(history)
 
     db.commit()
     db.refresh(schedule)
-    return schedule
+
+    result = ProductionScheduleOut.model_validate(schedule)
+    if powder_batch_ref:
+        result.powder_batch_info = PowderBatchOut.model_validate(powder_batch_ref)
+    return result
 
 
 @router.get("/check-conflicts", response_model=list[ScheduleConflictOut])
@@ -118,7 +166,14 @@ def check_conflicts(
 
 @router.get("/order/{order_id}", response_model=list[ProductionScheduleOut])
 def get_order_schedules(order_id: int, db: Session = Depends(get_db)):
-    return db.query(ProductionSchedule).filter(ProductionSchedule.order_id == order_id).all()
+    schedules = db.query(ProductionSchedule).filter(ProductionSchedule.order_id == order_id).all()
+    result = []
+    for sched in schedules:
+        out = ProductionScheduleOut.model_validate(sched)
+        if sched.powder_batch_ref:
+            out.powder_batch_info = PowderBatchOut.model_validate(sched.powder_batch_ref)
+        result.append(out)
+    return result
 
 
 @router.get("/equipment/{equipment_id}", response_model=list[ProductionScheduleOut])

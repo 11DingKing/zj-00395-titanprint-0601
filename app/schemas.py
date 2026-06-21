@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 
 from app.models import (
     OrderStatus, RidingPosture, UsageType, InspectionResult,
+    PowderBatchStatus, ReworkPriority,
 )
 
 
@@ -67,6 +68,9 @@ class OrderOut(BaseModel):
     updated_at: datetime
     spec: Optional[CustomerSpecOut] = None
     confirmation: Optional[EngineerConfirmationOut] = None
+    rework_priority: Optional[ReworkPriority] = None
+    needs_batch_review: Optional[bool] = None
+    powder_batch: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -78,6 +82,9 @@ class OrderListOut(BaseModel):
     status: OrderStatus
     created_at: datetime
     updated_at: datetime
+    rework_priority: Optional[ReworkPriority] = None
+    needs_batch_review: Optional[bool] = None
+    powder_batch: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -114,9 +121,74 @@ class PrintEquipmentOut(PrintEquipmentCreate):
     model_config = {"from_attributes": True}
 
 
+class PowderBatchCreate(BaseModel):
+    batch_no: str = Field(..., max_length=64)
+    material: str = Field(..., max_length=64)
+    manufacturer: str = Field(..., max_length=128)
+    production_date: datetime
+    expiry_date: datetime
+    initial_weight_kg: float = Field(..., gt=0)
+    remaining_weight_kg: float = Field(..., ge=0)
+    status: PowderBatchStatus = PowderBatchStatus.normal
+    recycling_count: int = Field(0, ge=0)
+    max_recycling: int = Field(10, gt=0)
+    heat_treat_window_low_c: Optional[float] = None
+    heat_treat_window_high_c: Optional[float] = None
+    anomaly_note: Optional[str] = None
+
+
+class PowderBatchUpdate(BaseModel):
+    material: Optional[str] = Field(None, max_length=64)
+    manufacturer: Optional[str] = Field(None, max_length=128)
+    production_date: Optional[datetime] = None
+    expiry_date: Optional[datetime] = None
+    initial_weight_kg: Optional[float] = Field(None, gt=0)
+    remaining_weight_kg: Optional[float] = Field(None, ge=0)
+    status: Optional[PowderBatchStatus] = None
+    recycling_count: Optional[int] = Field(None, ge=0)
+    max_recycling: Optional[int] = Field(None, gt=0)
+    heat_treat_window_low_c: Optional[float] = None
+    heat_treat_window_high_c: Optional[float] = None
+    anomaly_note: Optional[str] = None
+
+
+class PowderBatchOut(PowderBatchCreate):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class AffectedOrderOut(BaseModel):
+    order_id: int
+    order_no: str
+    customer_name: str
+    status: OrderStatus
+    schedule_id: int
+    print_start: datetime
+    inspection_result: Optional[InspectionResult] = None
+    rework_priority: Optional[ReworkPriority] = None
+    needs_batch_review: Optional[bool] = None
+
+    model_config = {"from_attributes": True}
+
+
+class BatchAnomalyReport(BaseModel):
+    batch_id: int
+    batch_no: str
+    affected_orders_count: int
+    affected_orders: list[AffectedOrderOut]
+    anomaly_note: Optional[str] = None
+
+
 class ProductionScheduleCreate(BaseModel):
     equipment_id: int
+    powder_batch_id: Optional[int] = None
     powder_batch: str = Field(..., max_length=64)
+    recycling_count: int = Field(0, ge=0)
+    heat_treat_window_low_c: Optional[float] = None
+    heat_treat_window_high_c: Optional[float] = None
     print_start: datetime
     print_end: datetime
     heat_treat_start: Optional[datetime] = None
@@ -128,6 +200,7 @@ class ProductionScheduleOut(ProductionScheduleCreate):
     id: int
     order_id: int
     created_at: datetime
+    powder_batch_info: Optional[PowderBatchOut] = None
 
     model_config = {"from_attributes": True}
 
@@ -139,6 +212,12 @@ class ScheduleConflictOut(BaseModel):
     print_end: datetime
 
 
+class BatchReviewUpdate(BaseModel):
+    batch_review_completed: bool
+    batch_review_note: Optional[str] = None
+    batch_reviewed_by: str = Field(..., max_length=128)
+
+
 class QualityInspectionCreate(BaseModel):
     stack_deviation_mm: Optional[float] = None
     reach_deviation_mm: Optional[float] = None
@@ -147,10 +226,12 @@ class QualityInspectionCreate(BaseModel):
     wall_thickness_deviation_mm: Optional[float] = None
     node_check: Optional[str] = Field(None, max_length=32)
     node_check_detail: Optional[str] = None
+    node_check_result: Optional[InspectionResult] = None
     flaw_detection_method: Optional[str] = Field(None, max_length=64)
     flaw_detection_result: InspectionResult
     flaw_detection_detail: Optional[str] = None
     within_tolerance: bool
+    rework_priority: Optional[ReworkPriority] = None
     repair_opinion: Optional[str] = None
     inspector: str = Field(..., max_length=128)
 
@@ -158,6 +239,11 @@ class QualityInspectionCreate(BaseModel):
 class QualityInspectionOut(QualityInspectionCreate):
     id: int
     order_id: int
+    needs_batch_review: bool = False
+    batch_review_completed: bool = False
+    batch_review_note: Optional[str] = None
+    batch_reviewed_by: Optional[str] = None
+    batch_reviewed_at: Optional[datetime] = None
     inspected_at: datetime
 
     model_config = {"from_attributes": True}
