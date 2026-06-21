@@ -4,10 +4,11 @@ from sqlalchemy.orm import Session
 from sqlalchemy import and_
 
 from app.database import get_db
-from app.models import Order, ProductionSchedule, PrintEquipment, OrderStatus
+from app.models import Order, ProductionSchedule, PrintEquipment, OrderStatus, OrderStatusHistory
 from app.schemas import (
     ProductionScheduleCreate, ProductionScheduleOut, ScheduleConflictOut,
 )
+from app.config import VALID_TRANSITIONS, STATUS_LABELS
 
 router = APIRouter(prefix="/schedules", tags=["production-scheduling"])
 
@@ -41,6 +42,16 @@ def create_schedule(order_id: int, payload: ProductionScheduleCreate, db: Sessio
     order = db.query(Order).filter(Order.id == order_id).first()
     if not order:
         raise HTTPException(404, "订单不存在")
+
+    if not order.confirmation:
+        raise HTTPException(400, "订单尚未经工程师确认，无法排产")
+
+    if order.status != OrderStatus.pending and order.status != OrderStatus.rework:
+        raise HTTPException(
+            400,
+            f"当前订单状态为「{STATUS_LABELS.get(order.status.value, order.status.value)}」，不能排产。"
+            f"仅「待确认」或「返修」状态的订单可排产",
+        )
 
     equipment = db.query(PrintEquipment).filter(PrintEquipment.id == payload.equipment_id).first()
     if not equipment:
@@ -78,6 +89,18 @@ def create_schedule(order_id: int, payload: ProductionScheduleCreate, db: Sessio
         print_duration_hours=payload.print_duration_hours or duration_hours,
     )
     db.add(schedule)
+
+    from_status = order.status
+    order.status = OrderStatus.scheduled
+    history = OrderStatusHistory(
+        order_id=order.id,
+        from_status=from_status,
+        to_status=OrderStatus.scheduled,
+        operator=None,
+        remark=f"打印排产已创建，设备：{equipment.name}",
+    )
+    db.add(history)
+
     db.commit()
     db.refresh(schedule)
     return schedule
@@ -120,5 +143,86 @@ def delete_schedule(schedule_id: int, db: Session = Depends(get_db)):
     schedule = db.query(ProductionSchedule).filter(ProductionSchedule.id == schedule_id).first()
     if not schedule:
         raise HTTPException(404, "排产记录不存在")
+
+    order_id = schedule.order_id
     db.delete(schedule)
+    db.flush()
+
+    remaining = (
+        db.query(ProductionSchedule)
+        .filter(ProductionSchedule.order_id == order_id)
+        .count()
+    )
+    if remaining == 0:
+        order = db.query(Order).filter(Order.id == order_id).first()
+        if order and order.status == OrderStatus.scheduled:
+            from_status = order.status
+            order.status = OrderStatus.pending
+            history = OrderStatusHistory(
+                order_id=order.id,
+                from_status=from_status,
+                to_status=OrderStatus.pending,
+                operator=None,
+                remark="最后一条排产记录已删除，订单回退至待确认状态",
+            )
+            db.add(history)
+
     db.commit()
+
+
+@router.post("/{schedule_id}/start-print", response_model=ProductionScheduleOut)
+def start_printing(schedule_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(ProductionSchedule).filter(ProductionSchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(404, "排产记录不存在")
+
+    order = db.query(Order).filter(Order.id == schedule.order_id).first()
+    if order.status != OrderStatus.scheduled:
+        raise HTTPException(
+            400,
+            f"当前订单状态为「{STATUS_LABELS.get(order.status.value, order.status.value)}」，"
+            f"仅「已排产」状态的订单可开始打印",
+        )
+
+    from_status = order.status
+    order.status = OrderStatus.printing
+    history = OrderStatusHistory(
+        order_id=order.id,
+        from_status=from_status,
+        to_status=OrderStatus.printing,
+        operator=None,
+        remark=f"开始打印，设备：{schedule.equipment.name}",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(schedule)
+    return schedule
+
+
+@router.post("/{schedule_id}/finish-print", response_model=ProductionScheduleOut)
+def finish_printing(schedule_id: int, db: Session = Depends(get_db)):
+    schedule = db.query(ProductionSchedule).filter(ProductionSchedule.id == schedule_id).first()
+    if not schedule:
+        raise HTTPException(404, "排产记录不存在")
+
+    order = db.query(Order).filter(Order.id == schedule.order_id).first()
+    if order.status != OrderStatus.printing:
+        raise HTTPException(
+            400,
+            f"当前订单状态为「{STATUS_LABELS.get(order.status.value, order.status.value)}」，"
+            f"仅「打印中」状态的订单可完成打印",
+        )
+
+    from_status = order.status
+    order.status = OrderStatus.inspecting
+    history = OrderStatusHistory(
+        order_id=order.id,
+        from_status=from_status,
+        to_status=OrderStatus.inspecting,
+        operator=None,
+        remark=f"打印完成，转入质检",
+    )
+    db.add(history)
+    db.commit()
+    db.refresh(schedule)
+    return schedule

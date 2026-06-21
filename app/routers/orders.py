@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Order, CustomerSpec, OrderStatusHistory, OrderStatus
+from app.models import Order, CustomerSpec, OrderStatusHistory, OrderStatus, QualityInspection, InspectionResult
 from app.schemas import (
     OrderCreate, OrderOut, OrderListOut, StatusTransition, StatusHistoryOut,
 )
@@ -89,6 +89,26 @@ def transition_status(order_id: int, payload: StatusTransition, db: Session = De
             f"状态流转不合法：{STATUS_LABELS.get(current, current)} → {STATUS_LABELS.get(target, target)}，"
             f"允许的目标状态：{[STATUS_LABELS.get(s, s) for s in allowed]}",
         )
+
+    if payload.to_status == OrderStatus.assembly_ready:
+        latest_inspection = (
+            db.query(QualityInspection)
+            .filter(QualityInspection.order_id == order_id)
+            .order_by(QualityInspection.inspected_at.desc())
+            .first()
+        )
+        if not latest_inspection:
+            raise HTTPException(400, "该订单尚无质检记录，不能标记为可装配")
+        blockers = []
+        if not latest_inspection.within_tolerance:
+            blockers.append("尺寸偏差超出容差")
+        if latest_inspection.flaw_detection_result == InspectionResult.fail:
+            blockers.append("探伤检查不通过")
+        if blockers:
+            raise HTTPException(
+                400,
+                f"车架不可装配：{'、'.join(blockers)}。请先完成返修并重新质检合格。",
+            )
 
     order.status = payload.to_status
     history = OrderStatusHistory(

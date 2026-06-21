@@ -4,10 +4,10 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./titanprint.db")
 
 VALID_TRANSITIONS = {
     "pending": ["scheduled"],
-    "scheduled": ["printing"],
+    "scheduled": ["printing", "pending"],
     "printing": ["inspecting"],
     "inspecting": ["rework", "assembly_ready"],
-    "rework": ["inspecting"],
+    "rework": ["scheduled", "inspecting"],
     "assembly_ready": [],
 }
 
