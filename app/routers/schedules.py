@@ -54,7 +54,8 @@ def create_schedule(order_id: int, payload: ProductionScheduleCreate, db: Sessio
         raise HTTPException(
             400,
             f"当前订单状态为「{STATUS_LABELS.get(order.status.value, order.status.value)}」，不能排产。"
-            f"仅「待确认」或「返修」状态的订单可排产",
+            f"仅「待确认」或「返修」状态的订单可排产。"
+            f"若客户刚发起变更，请先等待工程师完成重新确认后再排产。",
         )
 
     equipment = db.query(PrintEquipment).filter(PrintEquipment.id == payload.equipment_id).first()

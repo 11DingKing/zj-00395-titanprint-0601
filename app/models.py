@@ -11,11 +11,27 @@ from app.database import Base
 
 class OrderStatus(str, enum.Enum):
     pending = "pending"
+    change_pending = "change_pending"
     scheduled = "scheduled"
     printing = "printing"
     inspecting = "inspecting"
     rework = "rework"
     assembly_ready = "assembly_ready"
+
+
+class ChangeReviewStatus(str, enum.Enum):
+    pending = "pending"
+    approved = "approved"
+    rejected = "rejected"
+    superseded = "superseded"
+
+
+class ChangeType(str, enum.Enum):
+    height = "height"
+    inseam = "inseam"
+    riding_posture = "riding_posture"
+    usage = "usage"
+    other = "other"
 
 
 class PowderBatchStatus(str, enum.Enum):
@@ -62,14 +78,23 @@ class Order(Base):
     customer_name = Column(String(128), nullable=False)
     customer_contact = Column(String(256), nullable=False)
     status = Column(Enum(OrderStatus), default=OrderStatus.pending, nullable=False, index=True)
+    change_count = Column(Integer, default=0, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     spec = relationship("CustomerSpec", back_populates="order", uselist=False, cascade="all, delete-orphan")
-    confirmation = relationship("EngineerConfirmation", back_populates="order", uselist=False, cascade="all, delete-orphan")
+    confirmation_list = relationship("EngineerConfirmation", back_populates="order", cascade="all, delete-orphan")
     schedules = relationship("ProductionSchedule", back_populates="order", cascade="all, delete-orphan")
     inspections = relationship("QualityInspection", back_populates="order", cascade="all, delete-orphan")
     status_history = relationship("OrderStatusHistory", back_populates="order", cascade="all, delete-orphan")
+    change_requests = relationship("GeometryChangeRequest", back_populates="order", cascade="all, delete-orphan")
+
+    @property
+    def confirmation(self):
+        for c in self.confirmation_list:
+            if c.is_active:
+                return c
+        return None
 
 
 class CustomerSpec(Base):
@@ -97,7 +122,10 @@ class EngineerConfirmation(Base):
     __tablename__ = "engineer_confirmations"
 
     id = Column(Integer, primary_key=True, index=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), unique=True, nullable=False)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+    change_request_id = Column(Integer, ForeignKey("geometry_change_requests.id"), nullable=True, index=True)
+    version = Column(Integer, default=1, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
 
     frame_size_label = Column(String(32), nullable=False)
     stack_mm = Column(Float, nullable=False)
@@ -109,13 +137,62 @@ class EngineerConfirmation(Base):
 
     wall_thickness_mm = Column(Float, nullable=False)
     node_type = Column(String(64), nullable=False)
+    node_strength_rating = Column(String(32))
     target_weight_g = Column(Float, nullable=False)
 
     engineer_name = Column(String(128), nullable=False)
     confirmed_at = Column(DateTime, default=datetime.utcnow)
     remarks = Column(Text)
 
-    order = relationship("Order", back_populates="confirmation")
+    order = relationship("Order", back_populates="confirmation_list")
+    change_request = relationship("GeometryChangeRequest", back_populates="confirmations")
+
+
+class GeometryChangeRequest(Base):
+    __tablename__ = "geometry_change_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False, index=True)
+
+    change_types = Column(String(256), nullable=False)
+    reason = Column(Text, nullable=False)
+    requested_by = Column(String(128), nullable=False)
+
+    old_height_cm = Column(Float)
+    new_height_cm = Column(Float)
+    old_inseam_cm = Column(Float)
+    new_inseam_cm = Column(Float)
+    old_riding_posture = Column(Enum(RidingPosture))
+    new_riding_posture = Column(Enum(RidingPosture))
+    old_usage = Column(Enum(UsageType))
+    new_usage = Column(Enum(UsageType))
+    old_notes = Column(Text)
+    new_notes = Column(Text)
+    old_desired_stack = Column(Float)
+    new_desired_stack = Column(Float)
+    old_desired_reach = Column(Float)
+    new_desired_reach = Column(Float)
+    old_desired_head_angle = Column(Float)
+    new_desired_head_angle = Column(Float)
+    old_desired_seat_angle = Column(Float)
+    new_desired_seat_angle = Column(Float)
+    old_desired_wheelbase = Column(Float)
+    new_desired_wheelbase = Column(Float)
+
+    status = Column(Enum(ChangeReviewStatus), default=ChangeReviewStatus.pending, nullable=False, index=True)
+    requires_review = Column(Boolean, default=False, nullable=False)
+    reviewer_name = Column(String(128))
+    review_remark = Column(Text)
+    reviewed_at = Column(DateTime)
+
+    schedules_cleared = Column(Boolean, default=False, nullable=False)
+    delivery_delay_hours = Column(Float, default=0, nullable=False)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    order = relationship("Order", back_populates="change_requests")
+    confirmations = relationship("EngineerConfirmation", back_populates="change_request")
 
 
 class PowderBatch(Base):

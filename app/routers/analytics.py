@@ -6,9 +6,12 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import (
     PrintEquipment, ProductionSchedule, QualityInspection, Order, OrderStatus,
-    OrderStatusHistory, PowderBatch,
+    OrderStatusHistory, PowderBatch, GeometryChangeRequest, ChangeReviewStatus,
 )
-from app.schemas import EquipmentUtilizationOut, ReworkRateOut, DeliveryCycleOut
+from app.schemas import (
+    EquipmentUtilizationOut, ReworkRateOut, DeliveryCycleOut,
+    DeliveryCycleDetailOut,
+)
 
 router = APIRouter(prefix="/analytics", tags=["analytics"])
 
@@ -180,6 +183,103 @@ def delivery_cycle(
                 equipment_id=eq.id,
                 equipment_name=eq.name,
                 average_delivery_hours=avg_hours,
+                order_count=len(delivery_hours_list),
+            )
+        )
+    return result
+
+
+@router.get("/delivery-cycle-detail", response_model=list[DeliveryCycleDetailOut])
+def delivery_cycle_detail(
+    start: datetime | None = None,
+    end: datetime | None = None,
+    powder_batch_id: int | None = None,
+    powder_batch_no: str | None = None,
+    db: Session = Depends(get_db),
+):
+    equipments = db.query(PrintEquipment).all()
+    result = []
+
+    batch_filter = None
+    if powder_batch_id:
+        batch_filter = ProductionSchedule.powder_batch_id == powder_batch_id
+    elif powder_batch_no:
+        batch_filter = ProductionSchedule.powder_batch == powder_batch_no
+
+    for eq in equipments:
+        schedule_q = db.query(ProductionSchedule).filter(ProductionSchedule.equipment_id == eq.id)
+        if start:
+            schedule_q = schedule_q.filter(ProductionSchedule.print_start >= start)
+        if end:
+            schedule_q = schedule_q.filter(ProductionSchedule.print_end <= end)
+        if batch_filter is not None:
+            schedule_q = schedule_q.filter(batch_filter)
+        schedules = schedule_q.all()
+
+        order_ids = list({s.order_id for s in schedules})
+
+        delivery_hours_list = []
+        delivery_with_changes_list = []
+        change_delay_list = []
+        change_affected_count = 0
+
+        for oid in order_ids:
+            created = (
+                db.query(func.min(OrderStatusHistory.created_at))
+                .filter(
+                    OrderStatusHistory.order_id == oid,
+                    OrderStatusHistory.to_status == OrderStatus.pending,
+                )
+                .scalar()
+            )
+            delivered = (
+                db.query(func.min(OrderStatusHistory.created_at))
+                .filter(
+                    OrderStatusHistory.order_id == oid,
+                    OrderStatusHistory.to_status == OrderStatus.assembly_ready,
+                )
+                .scalar()
+            )
+            if created and delivered:
+                raw_hours = (delivered - created).total_seconds() / 3600
+                delivery_hours_list.append(raw_hours)
+
+                change_delays = (
+                    db.query(func.coalesce(func.sum(GeometryChangeRequest.delivery_delay_hours), 0))
+                    .filter(
+                        GeometryChangeRequest.order_id == oid,
+                        GeometryChangeRequest.status == ChangeReviewStatus.approved,
+                    )
+                    .scalar()
+                ) or 0
+
+                order_rec = db.query(Order).filter(Order.id == oid).first()
+                if order_rec and order_rec.change_count > 0:
+                    change_affected_count += 1
+                    change_delay_list.append(change_delays)
+                    delivery_with_changes_list.append(raw_hours)
+
+        avg_hours = None
+        avg_with_changes_hours = None
+        avg_delay_hours = None
+
+        if delivery_hours_list:
+            avg_hours = round(sum(delivery_hours_list) / len(delivery_hours_list), 2)
+        if delivery_with_changes_list:
+            avg_with_changes_hours = round(
+                sum(delivery_with_changes_list) / len(delivery_with_changes_list), 2
+            )
+        if change_delay_list:
+            avg_delay_hours = round(sum(change_delay_list) / len(change_delay_list), 2)
+
+        result.append(
+            DeliveryCycleDetailOut(
+                equipment_id=eq.id,
+                equipment_name=eq.name,
+                average_delivery_hours=avg_hours,
+                average_delivery_with_changes_hours=avg_with_changes_hours,
+                average_delay_from_changes_hours=avg_delay_hours,
+                change_affected_orders=change_affected_count,
                 order_count=len(delivery_hours_list),
             )
         )

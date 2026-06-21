@@ -18,12 +18,35 @@ def create_inspection(order_id: int, payload: QualityInspectionCreate, db: Sessi
     if not order:
         raise HTTPException(404, "订单不存在")
 
-    if order.status != OrderStatus.inspecting and order.status != OrderStatus.printing:
+    if order.status not in [OrderStatus.inspecting, OrderStatus.printing]:
         raise HTTPException(
             400,
             f"当前订单状态为「{STATUS_LABELS.get(order.status.value, order.status.value)}」，不能提交质检。"
             f"仅「打印中」或「质检中」状态的订单可提交质检",
         )
+
+    if not order.confirmation:
+        raise HTTPException(
+            400,
+            "该订单尚未有有效的工程师确认记录作为质检基准，"
+            "请先完成工程师确认后再进行质检。",
+        )
+
+    active_conf = order.confirmation
+    if not active_conf.is_active:
+        raise HTTPException(
+            400,
+            "当前有效的工程师确认记录已被标记为非活跃，"
+            "可能存在几何参数变更未完成重新确认流程。",
+        )
+
+    tolerance_details = []
+    if payload.stack_deviation_mm is not None:
+        tolerance_details.append(f"stack偏差{payload.stack_deviation_mm:.2f}mm(基准{active_conf.stack_mm}mm)")
+    if payload.reach_deviation_mm is not None:
+        tolerance_details.append(f"reach偏差{payload.reach_deviation_mm:.2f}mm(基准{active_conf.reach_mm}mm)")
+    if payload.wall_thickness_deviation_mm is not None:
+        tolerance_details.append(f"壁厚偏差{payload.wall_thickness_deviation_mm:.3f}mm(基准{active_conf.wall_thickness_mm}mm)")
 
     if not payload.within_tolerance:
         if payload.repair_opinion is None or payload.repair_opinion.strip() == "":
@@ -32,6 +55,8 @@ def create_inspection(order_id: int, payload: QualityInspectionCreate, db: Sessi
     inspection = QualityInspection(order_id=order_id, **payload.model_dump())
     db.add(inspection)
     db.flush()
+
+    baseline_msg = f"（质检基准：工程师确认v{active_conf.version}，目标重量{active_conf.target_weight_g}g）"
 
     from_status = order.status
     need_rework = (not payload.within_tolerance) or (payload.flaw_detection_result == InspectionResult.fail)
@@ -106,14 +131,14 @@ def create_inspection(order_id: int, payload: QualityInspectionCreate, db: Sessi
             reasons.append("尺寸偏差超出容差")
         if payload.flaw_detection_result == InspectionResult.fail:
             reasons.append("探伤检查不通过")
-        history_remark = f"质检结果不合格，转返修（{'、'.join(reasons)}）"
+        history_remark = f"质检结果不合格，转返修（{'、'.join(reasons)}）{baseline_msg}"
         if payload.repair_opinion:
             history_remark += f"；返修意见：{payload.repair_opinion}"
         if inspection.needs_batch_review:
             history_remark += "；已触发粉末批次异常关联复核"
     else:
         order.status = OrderStatus.assembly_ready
-        history_remark = "质检通过（尺寸偏差在容差范围内，探伤检查合格），车架可装配"
+        history_remark = f"质检通过（尺寸偏差在容差范围内，探伤检查合格），车架可装配{baseline_msg}"
 
     history = OrderStatusHistory(
         order_id=order.id,
